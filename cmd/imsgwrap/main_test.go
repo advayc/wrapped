@@ -77,6 +77,7 @@ func TestCollectEmojiKeepsVariationSelector(t *testing.T) {
 func TestHTMLTemplateRenders(t *testing.T) {
 	report := analysis{
 		Timeframe:        timeframe{Label: "2026", Start: time.Date(2026, 1, 1, 0, 0, 0, 0, time.Local), End: time.Date(2026, 12, 31, 0, 0, 0, 0, time.Local)},
+		DurationLabel:    "365 days",
 		TotalMessages:    10,
 		SentMessages:     6,
 		ReceivedMessages: 4,
@@ -84,6 +85,9 @@ func TestHTMLTemplateRenders(t *testing.T) {
 		DailyCounts:      []dayCount{{Date: "2026-01-01", Count: 10}},
 		Words:            []wordCount{{Text: "test", Count: 3}},
 		Emojis:           []emojiCount{{Emoji: "😂", Count: 2}},
+		Tapbacks:         []emojiCount{{Emoji: "Loved", Count: 1}},
+		AvgResponseMin:   12.5,
+		AvgTheirReplyMin: 7.5,
 	}
 	var b strings.Builder
 	if err := pageTemplate.Execute(&b, map[string]any{"Report": report, "Data": `{}`}); err != nil {
