@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -630,15 +631,24 @@ func loadMessages(tf timeframe, contacts map[string]string) ([]message, map[int6
 		}
 		rows.Close()
 	}
+	for cid, handles := range chatHandles {
+		normalized := normalizeChatHandles(handles, contacts)
+		chatHandles[cid] = normalized
+		participants[cid] = len(normalized)
+	}
 
 	hasAssoc := hasColumn(db, "message", "associated_message_type")
 	assocExpr := "0"
 	if hasAssoc {
 		assocExpr = "COALESCE(m.associated_message_type,0)"
 	}
+	bodyExpr := "NULL"
+	if hasColumn(db, "message", "attributedBody") {
+		bodyExpr = "m.attributedBody"
+	}
 	startUnix, endUnix := tf.Start.Unix(), tf.End.Unix()
 	q := fmt.Sprintf(`
-SELECT m.ROWID, COALESCE(cmj.chat_id,0), COALESCE(c.display_name,''), COALESCE(h.id,''), COALESCE(m.is_from_me,0), COALESCE(m.text,''),
+SELECT m.ROWID, COALESCE(cmj.chat_id,0), COALESCE(c.display_name,''), COALESCE(h.id,''), COALESCE(m.is_from_me,0), COALESCE(m.text,''), %s,
        CAST((m.date/1000000000+978307200) AS INTEGER), %s,
        (SELECT COUNT(*) FROM message_attachment_join maj WHERE maj.message_id=m.ROWID)
 FROM message m
@@ -646,7 +656,7 @@ LEFT JOIN chat_message_join cmj ON m.ROWID=cmj.message_id
 LEFT JOIN chat c ON cmj.chat_id=c.ROWID
 LEFT JOIN handle h ON m.handle_id=h.ROWID
 WHERE (m.date/1000000000+978307200) >= ? AND (m.date/1000000000+978307200) <= ?
-ORDER BY m.date`, assocExpr)
+ORDER BY m.date`, bodyExpr, assocExpr)
 	rows, err = db.Query(q, startUnix, endUnix)
 	if err != nil {
 		return nil, nil, err
@@ -655,12 +665,15 @@ ORDER BY m.date`, assocExpr)
 	var out []message
 	for rows.Next() {
 		var m message
+		var rawText string
+		var body []byte
 		var fromMe int
 		var unix int64
 		var assoc int
-		if err := rows.Scan(&m.ID, &m.ChatID, &m.ChatName, &m.Handle, &fromMe, &m.Text, &unix, &assoc, &m.AttachmentCount); err != nil {
+		if err := rows.Scan(&m.ID, &m.ChatID, &m.ChatName, &m.Handle, &fromMe, &rawText, &body, &unix, &assoc, &m.AttachmentCount); err != nil {
 			return nil, nil, err
 		}
+		m.Text = messageText(rawText, body)
 		m.IsFromMe = fromMe == 1
 		m.At = time.Unix(unix, 0)
 		m.IsGroup = participants[m.ChatID] >= 2
@@ -678,6 +691,104 @@ ORDER BY m.date`, assocExpr)
 	}
 	return out, participants, nil
 }
+
+func normalizeChatHandles(handles []string, contacts map[string]string) []string {
+	out := make([]string, 0, len(handles))
+	seen := map[string]bool{}
+	for _, handle := range handles {
+		handle = strings.TrimSpace(handle)
+		if handle == "" {
+			continue
+		}
+		key, _ := contactFor(handle, contacts)
+		if key == "" {
+			key = "raw:" + strings.ToLower(handle)
+		}
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, handle)
+	}
+	return out
+}
+
+func messageText(text string, attributedBody []byte) string {
+	if strings.TrimSpace(text) != "" {
+		return text
+	}
+	return attributedBodyText(attributedBody)
+}
+
+func attributedBodyText(body []byte) string {
+	if len(body) == 0 {
+		return ""
+	}
+	var candidates []string
+	if idx := bytes.Index(body, []byte("NSString")); idx >= 0 {
+		payload := body[idx+len("NSString"):]
+		if len(payload) > 5 {
+			if exact := cleanAttributedPayload(payload[5:]); messageTextScore(exact) > 0 {
+				return exact
+			}
+		}
+		limit := min(12, len(payload))
+		for i := 0; i <= limit; i++ {
+			candidates = append(candidates, cleanAttributedPayload(payload[i:]))
+		}
+	}
+	candidates = append(candidates, cleanAttributedPayload(body))
+	best, bestScore := "", 0
+	for _, c := range candidates {
+		if score := messageTextScore(c); score > bestScore {
+			best, bestScore = c, score
+		}
+	}
+	return best
+}
+
+func cleanAttributedPayload(payload []byte) string {
+	s := strings.ToValidUTF8(string(payload), "")
+	for _, marker := range []string{"NSDictionary", "NSAttributedString", "NSNumber", "NSObject", "$class", "$objects"} {
+		if idx := strings.Index(s, marker); idx >= 0 {
+			s = s[:idx]
+		}
+	}
+	s = strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\t' || unicode.IsPrint(r) {
+			return r
+		}
+		return -1
+	}, s)
+	return strings.TrimSpace(s)
+}
+
+func messageTextScore(s string) int {
+	s = strings.TrimSpace(s)
+	if s == "" || isArchiveString(s) {
+		return 0
+	}
+	score := 0
+	for _, r := range s {
+		if unicode.IsLetter(r) || unicode.IsNumber(r) || unicode.IsSymbol(r) || unicode.IsPunct(r) {
+			score++
+		}
+	}
+	return score
+}
+
+func isArchiveString(s string) bool {
+	s = strings.TrimSpace(s)
+	if strings.HasPrefix(s, "NS") || strings.HasPrefix(s, "$") {
+		return true
+	}
+	switch s {
+	case "NSString", "NSDictionary", "NSNumber", "NSObject", "NSAttributedString", "bplist00":
+		return true
+	}
+	return false
+}
+
 func hasColumn(db *sql.DB, table, column string) bool {
 	rows, err := db.Query("PRAGMA table_info(" + table + ")")
 	if err != nil {
@@ -796,7 +907,7 @@ func analyze(msgs []message, participants map[int64]int, tf timeframe) analysis 
 		if m.IsGroup {
 			g := groupMap[m.ChatID]
 			if g == nil {
-				name := m.ChatName
+				name := m.ContactName
 				if name == "" {
 					name = fmt.Sprintf("Group %d", m.ChatID)
 				}

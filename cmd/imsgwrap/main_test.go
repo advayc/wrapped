@@ -1,6 +1,8 @@
 package main
 
 import (
+	"database/sql"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -38,6 +40,80 @@ func TestResolveHandleUsesSingleParticipant(t *testing.T) {
 	got := resolveHandle("", []string{"+1 (555) 123-4567"})
 	if got != "+1 (555) 123-4567" {
 		t.Fatalf("got %q", got)
+	}
+}
+
+func TestNormalizeChatHandlesMergesSameContactAliases(t *testing.T) {
+	contacts := map[string]string{"5551234567": "Ada", "ada@example.com": "Ada"}
+	got := normalizeChatHandles([]string{"5551234567", "ada@example.com"}, contacts)
+	if len(got) != 1 {
+		t.Fatalf("got %v", got)
+	}
+}
+
+func TestAttributedBodyFallbackText(t *testing.T) {
+	body := []byte("bplist00 noise NSString\x01\x94\x84\x01+hello there NSDictionary")
+	if got := messageText("", body); got != "hello there" {
+		t.Fatalf("got %q", got)
+	}
+}
+
+func TestLoadMessagesCountsOneToOneWithAliasHandlesAndAttributedBody(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "chat.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, stmt := range []string{
+		"CREATE TABLE message (ROWID INTEGER PRIMARY KEY, handle_id INTEGER, is_from_me INTEGER, text TEXT, attributedBody BLOB, date INTEGER, associated_message_type INTEGER)",
+		"CREATE TABLE chat_message_join (chat_id INTEGER, message_id INTEGER)",
+		"CREATE TABLE chat (ROWID INTEGER PRIMARY KEY, display_name TEXT)",
+		"CREATE TABLE handle (ROWID INTEGER PRIMARY KEY, id TEXT)",
+		"CREATE TABLE chat_handle_join (chat_id INTEGER, handle_id INTEGER)",
+		"CREATE TABLE message_attachment_join (message_id INTEGER)",
+		"INSERT INTO chat VALUES (1, '')",
+		"INSERT INTO handle VALUES (1, '5551234567')",
+		"INSERT INTO handle VALUES (2, 'ada@example.com')",
+		"INSERT INTO chat_handle_join VALUES (1, 1)",
+		"INSERT INTO chat_handle_join VALUES (1, 2)",
+	} {
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	at := time.Date(2026, 1, 2, 12, 0, 0, 0, time.Local)
+	imsgDate := (at.Unix() - appleEpochOffset) * 1000000000
+	body := []byte("bplist00 noise NSString\x01\x94\x84\x01+sent text NSDictionary")
+	if _, err := db.Exec("INSERT INTO message VALUES (1, NULL, 1, '', ?, ?, 0)", body, imsgDate); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("INSERT INTO message VALUES (2, 2, 0, 'received text', NULL, ?, 0)", imsgDate+1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("INSERT INTO chat_message_join VALUES (1, 1), (1, 2)"); err != nil {
+		t.Fatal(err)
+	}
+
+	old := messageDB
+	messageDB = dbPath
+	t.Cleanup(func() { messageDB = old })
+
+	contacts := map[string]string{"5551234567": "Ada", "ada@example.com": "Ada"}
+	msgs, participants, err := loadMessages(timeframe{Start: at.Add(-time.Hour), End: at.Add(time.Hour)}, contacts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if participants[1] != 1 {
+		t.Fatalf("participants = %d", participants[1])
+	}
+	report := analyze(msgs, participants, timeframe{})
+	if len(report.TopContacts) != 1 {
+		t.Fatalf("contacts = %+v groups = %+v", report.TopContacts, report.TopGroups)
+	}
+	got := report.TopContacts[0]
+	if got.Name != "Ada" || got.Messages != 2 || got.Sent != 1 || got.Received != 1 {
+		t.Fatalf("got %+v", got)
 	}
 }
 
