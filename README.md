@@ -4,16 +4,26 @@ Wrapped is a simple local iMessage Wrapped for macOS written in Go. It reads you
 
 ## Use
 
+### With Go downloaded
+
 ```bash
-curl -fsSL https://raw.githubusercontent.com/advayc/wrapped/main/imsgwrap.sh -o imsgwrap
-chmod +x imsgwrap
-./imsgwrap
+go run ./cmd/imsgwrap
 ```
+
+### Without Go downloaded
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/advayc/wrapped/main/imsgwrap.sh -o imsgwrap.sh
+chmod +x imsgwrap.sh
+./imsgwrap.sh
+```
+
+The first run downloads the prebuilt macOS binary into your cache, then reuses it.
 
 For local development in this repo:
 
 ```bash
-./imsgwrap.sh
+go run ./cmd/imsgwrap
 ```
 
 ## Notes
