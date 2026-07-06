@@ -1,6 +1,6 @@
-# imsgwrap
+# Wrapped
 
-Local iMessage Wrapped for macOS. It reads your Messages database, lets you choose a timeframe in the terminal, then opens a Spotify-style local website.
+Wrapped is a simple local iMessage Wrapped for macOS written in Go. It reads your Messages database, lets you choose a timeframe in the terminal, then opens a Spotify-style wrapped website to view your stats. All data is local and nothing is uploaded anywhere
 
 ## Use
 

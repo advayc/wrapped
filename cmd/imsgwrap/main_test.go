@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -40,5 +41,35 @@ func TestCollectWordsSkipsStopwords(t *testing.T) {
 	collectWords("the best best conversation", counts, stopwords())
 	if counts["the"] != 0 || counts["best"] != 2 || counts["conversation"] != 1 {
 		t.Fatalf("unexpected counts: %+v", counts)
+	}
+}
+
+func TestCollectEmojiKeepsVariationSelector(t *testing.T) {
+	counts := map[string]int{}
+	collectEmoji("❤️ ❤️ 😂", counts)
+	if counts["❤️"] != 2 || counts["😂"] != 1 {
+		t.Fatalf("unexpected emoji counts: %+v", counts)
+	}
+}
+
+func TestHTMLTemplateRenders(t *testing.T) {
+	report := analysis{
+		Timeframe:        timeframe{Label: "2026", Start: time.Date(2026, 1, 1, 0, 0, 0, 0, time.Local), End: time.Date(2026, 12, 31, 0, 0, 0, 0, time.Local)},
+		TotalMessages:    10,
+		SentMessages:     6,
+		ReceivedMessages: 4,
+		TopContacts:      []contactStat{{Name: "Ada", Messages: 10, Sent: 6, Received: 4, Monthly: map[string]int{"2026-01": 10}}},
+		DailyCounts:      []dayCount{{Date: "2026-01-01", Count: 10}},
+		ConversationHeat: []hourDayCount{{Day: 4, Hour: 12, Count: 10}},
+		Words:            []wordCount{{Text: "test", Count: 3}},
+		Emojis:           []emojiCount{{Emoji: "😂", Count: 2}},
+		EmojiSignature:   "😂",
+	}
+	var b strings.Builder
+	if err := pageTemplate.Execute(&b, map[string]any{"Report": report, "Data": `{}`}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(b.String(), "Save summary image") {
+		t.Fatal("summary save button missing")
 	}
 }
