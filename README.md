@@ -10,7 +10,7 @@ chmod +x imsgwrap.sh
 ./imsgwrap.sh
 ```
 
-If Go is installed and you are in a cloned repo, the script runs `go run ./cmd/imsgwrap`.
+If Go is installed and working in a cloned repo, the script runs `go run ./cmd/imsgwrap`.
 Otherwise it downloads the prebuilt macOS binary into your cache and reuses it.
 
 For local development in this repo:

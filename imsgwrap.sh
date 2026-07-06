@@ -8,10 +8,8 @@ REMOTE_BIN_URL="https://raw.githubusercontent.com/advayc/wrapped/main/imsgwrap"
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/imsgwrap"
 CACHE_BIN="$CACHE_DIR/imsgwrap"
 
-if command -v go >/dev/null 2>&1; then
-  if [ -d "$ROOT/cmd/imsgwrap" ] && [ -f "$ROOT/go.mod" ]; then
-    exec go run "$ROOT/cmd/imsgwrap" "$@"
-  fi
+if [ -d "$ROOT/cmd/imsgwrap" ] && [ -f "$ROOT/go.mod" ] && command -v go >/dev/null 2>&1 && go version >/dev/null 2>&1; then
+  exec go run "$ROOT/cmd/imsgwrap" "$@"
 fi
 
 if [ -x "$BIN" ]; then
