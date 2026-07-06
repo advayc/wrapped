@@ -150,6 +150,24 @@ func TestCollectEmojiKeepsVariationSelector(t *testing.T) {
 	}
 }
 
+func TestPythonEmojiAndPerDayMatchReference(t *testing.T) {
+	counts := map[string]int{}
+	collectWrappedEmoji("😂😂 ❤️ ❤️ 💯", counts, pythonEmojiSet)
+	if counts["😂"] != 1 || counts["❤️"] != 1 || counts["💯"] != 1 {
+		t.Fatalf("unexpected wrapped emoji counts: %+v", counts)
+	}
+	if top, n := topPythonEmoji(counts, pythonEmojiSet); top != "😂" || n != 1 {
+		t.Fatalf("unexpected top emoji: %q %d", top, n)
+	}
+
+	old := timeNow
+	timeNow = func() time.Time { return time.Date(2026, 7, 6, 12, 0, 0, 0, time.Local) }
+	t.Cleanup(func() { timeNow = old })
+	if got := messagesPerDayForPython(1860); got != 10 {
+		t.Fatalf("messages per day = %d", got)
+	}
+}
+
 func TestHTMLTemplateRenders(t *testing.T) {
 	report := analysis{
 		Timeframe:        timeframe{Label: "2026", Start: time.Date(2026, 1, 1, 0, 0, 0, 0, time.Local), End: time.Date(2026, 12, 31, 0, 0, 0, 0, time.Local)},

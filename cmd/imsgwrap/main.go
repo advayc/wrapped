@@ -33,6 +33,7 @@ const (
 var (
 	messageDB      = filepath.Join(homeDir(), "Library", "Messages", "chat.db")
 	addressBookDir = filepath.Join(homeDir(), "Library", "Application Support", "AddressBook")
+	pythonEmojiSet = []string{"😂", "❤️", "😭", "🔥", "💀", "✨", "🙏", "👀", "💯", "😈"}
 	green          = lipgloss.Color("#216e39")
 	blue           = lipgloss.Color("#0969da")
 	muted          = lipgloss.Color("#6e7781")
@@ -41,6 +42,7 @@ var (
 	titleStyle     = lipgloss.NewStyle().Foreground(blue).Bold(true)
 	checkStyle     = lipgloss.NewStyle().Foreground(green).Bold(true)
 	phoneRE        = regexp.MustCompile(`\D`)
+	timeNow        = time.Now
 )
 
 type timeframe struct {
@@ -132,6 +134,7 @@ type analysis struct {
 	Timeframe          timeframe     `json:"timeframe"`
 	DurationLabel      string        `json:"durationLabel"`
 	TotalMessages      int           `json:"totalMessages"`
+	MessagesPerDay     int           `json:"messagesPerDay"`
 	SentMessages       int           `json:"sentMessages"`
 	ReceivedMessages   int           `json:"receivedMessages"`
 	AttachmentMessages int           `json:"attachmentMessages"`
@@ -147,6 +150,8 @@ type analysis struct {
 	Words              []wordCount   `json:"words"`
 	Emojis             []emojiCount  `json:"emojis"`
 	Tapbacks           []emojiCount  `json:"tapbacks"`
+	TopEmoji           string        `json:"topEmoji"`
+	TopEmojiCount      int           `json:"topEmojiCount"`
 	StarterYouPct      int           `json:"starterYouPct"`
 	AvgResponseMin     float64       `json:"avgResponseMin"`
 	AvgTheirReplyMin   float64       `json:"avgTheirReplyMin"`
@@ -873,6 +878,7 @@ func analyze(msgs []message, participants map[int64]int, tf timeframe) analysis 
 	daily := map[string]int{}
 	words := map[string]int{}
 	emojis := map[string]int{}
+	wrappedEmojiCounts := map[string]int{}
 	tapbacks := map[string]int{}
 	contactDays := map[string]map[string]bool{}
 	busiestContacts := map[string]map[string]int{}
@@ -947,6 +953,9 @@ func analyze(msgs []message, participants map[int64]int, tf timeframe) analysis 
 		if strings.TrimSpace(m.Text) != "" {
 			collectWords(m.Text, words, wordStop)
 			collectEmoji(m.Text, emojis)
+			if m.IsFromMe && !m.IsTapback {
+				collectWrappedEmoji(m.Text, wrappedEmojiCounts, pythonEmojiSet)
+			}
 		}
 	}
 
@@ -1051,7 +1060,9 @@ func analyze(msgs []message, participants map[int64]int, tf timeframe) analysis 
 	if startsYou+startsThem > 0 {
 		starterPct = int(math.Round(float64(startsYou) * 100 / float64(startsYou+startsThem)))
 	}
-	return analysis{GeneratedAt: time.Now().Format(time.RFC3339), Timeframe: tf, DurationLabel: fmt.Sprintf("%d days", int(tf.End.Sub(tf.Start).Hours()/24)+1), TotalMessages: total, SentMessages: sent, ReceivedMessages: recv, AttachmentMessages: attach, ReactionCount: reactions, UniqueContacts: len(contactMap), TopContacts: limitContacts(contacts, 20), TopGroups: limitGroups(groups, 5), DailyCounts: days, GoldenHour: "", GoldenDay: "", BusiestDay: busy, LongestStreak: streak, Words: topWords(words, 60), Emojis: topEmojis(emojis, 12), Tapbacks: topEmojis(tapbacks, 6), StarterYouPct: starterPct, AvgResponseMin: avg(yourReplySamples), AvgTheirReplyMin: avg(theirReplySamples), DoubleTexts: doubleTexts, BurstShort: burstShort, BurstLong: burstLong, RelationshipLines: limitContacts(contacts, 5)}
+	messagesPerDay := messagesPerDayForPython(total)
+	topEmoji, topEmojiCount := topPythonEmoji(wrappedEmojiCounts, pythonEmojiSet)
+	return analysis{GeneratedAt: timeNow().Format(time.RFC3339), Timeframe: tf, DurationLabel: fmt.Sprintf("%d days", int(tf.End.Sub(tf.Start).Hours()/24)+1), TotalMessages: total, MessagesPerDay: messagesPerDay, SentMessages: sent, ReceivedMessages: recv, AttachmentMessages: attach, ReactionCount: reactions, UniqueContacts: len(contactMap), TopContacts: limitContacts(contacts, 20), TopGroups: limitGroups(groups, 5), DailyCounts: days, GoldenHour: "", GoldenDay: "", BusiestDay: busy, LongestStreak: streak, Words: topWords(words, 60), Emojis: topEmojis(emojis, 12), Tapbacks: topEmojis(tapbacks, 6), TopEmoji: topEmoji, TopEmojiCount: topEmojiCount, StarterYouPct: starterPct, AvgResponseMin: avg(yourReplySamples), AvgTheirReplyMin: avg(theirReplySamples), DoubleTexts: doubleTexts, BurstShort: burstShort, BurstLong: burstLong, RelationshipLines: limitContacts(contacts, 5)}
 }
 
 func transitions(arr []message, from, to bool) int {
@@ -1151,6 +1162,32 @@ func topEmojis(m map[string]int, n int) []emojiCount {
 		out = out[:n]
 	}
 	return out
+}
+func collectWrappedEmoji(text string, counts map[string]int, order []string) {
+	for _, emoji := range order {
+		if strings.Contains(text, emoji) {
+			counts[emoji]++
+		}
+	}
+}
+func topPythonEmoji(counts map[string]int, order []string) (string, int) {
+	bestEmoji := ""
+	bestCount := 0
+	for _, emoji := range order {
+		if count := counts[emoji]; count > bestCount {
+			bestEmoji = emoji
+			bestCount = count
+		}
+	}
+	return bestEmoji, bestCount
+}
+func messagesPerDayForPython(total int) int {
+	now := timeNow()
+	daysElapsed := now.YearDay() - 1
+	if daysElapsed < 1 {
+		daysElapsed = 1
+	}
+	return total / daysElapsed
 }
 func firstEmoji(m map[string]int) string {
 	e := topEmojis(m, 1)
@@ -1290,10 +1327,10 @@ const htmlPage = `<!doctype html><html><head><meta charset="utf-8"><meta name="v
 <section class="slide"><div class="kicker">Reply Stats</div><div class="grid"><div class="card blue"><div class="num">{{printf "%.1f" .Report.AvgResponseMin}}</div><div class="label">avg response time</div></div><div class="card pink"><div class="num">{{.Report.ReactionCount}}</div><div class="label">tapbacks found</div></div><div class="card green"><div class="num">{{.Report.DurationLabel}}</div><div class="label">report duration</div></div></div><div class="sub">Top emoji and tapback appear in the summary card.</div></section>
 <section class="slide"><div class="kicker">Relationship Evolution</div><div class="chart-card"><div class="chart-title">Monthly message volume with top contacts</div><div class="chart-note">Total monthly volume across your top contacts in this report.</div><div class="bars" id="evolution"></div></div></section>
 <section class="slide"><div class="kicker">Receipt Breakdown</div><div class="hero">{{.Report.ReactionCount}}</div><div class="sub">Tapbacks/reactions found. They are not counted as normal messages.</div></section>
-<section class="slide"><div class="kicker">Share Card</div><div class="summary-card" id="summaryCard"><div class="summary-top"><div><div class="summary-title">iMessage Wrapped</div><div class="label">{{.Report.Timeframe.Label}}</div><div class="label">{{.Report.DurationLabel}}</div></div></div><div class="hero" style="font-size:72px">{{.Report.TotalMessages}}</div><div class="label">messages analyzed</div><div class="summary-grid"><div class="summary-stat"><div class="num" style="font-size:36px">{{.Report.SentMessages}}</div><div class="label">sent</div></div><div class="summary-stat"><div class="num" style="font-size:36px">{{.Report.ReceivedMessages}}</div><div class="label">received</div></div><div class="summary-stat"><div class="num" style="font-size:36px">{{printf "%.1f" .Report.AvgResponseMin}}</div><div class="label">avg response time</div></div><div class="summary-stat"><div class="num" style="font-size:36px">{{.Report.StarterYouPct}}%</div><div class="label">starter ratio</div></div></div><div class="summary-footer" id="summaryTop"></div></div><button class="save-btn" onclick="saveSummary(event)">Save summary image</button></section>
+<section class="slide"><div class="kicker">Share Card</div><div class="summary-card" id="summaryCard"><div class="summary-top"><div><div class="summary-title">iMessage Wrapped</div><div class="label">{{.Report.Timeframe.Label}}</div><div class="label">{{.Report.DurationLabel}}</div></div></div><div class="hero" style="font-size:72px">{{.Report.TotalMessages}}</div><div class="label">messages analyzed</div><div class="summary-grid"><div class="summary-stat"><div class="num" style="font-size:36px">{{.Report.SentMessages}}</div><div class="label">sent</div></div><div class="summary-stat"><div class="num" style="font-size:36px">{{.Report.ReceivedMessages}}</div><div class="label">received</div></div><div class="summary-stat"><div class="num" style="font-size:36px">{{printf "%.1f" .Report.AvgResponseMin}}</div><div class="label">avg response time</div></div><div class="summary-stat"><div class="num" style="font-size:36px">{{.Report.StarterYouPct}}%</div><div class="label">starter ratio</div></div></div><div class="summary-footer" id="summaryTop">{{if .Report.TopEmoji}}Top emoji: {{.Report.TopEmoji}} ({{.Report.TopEmojiCount}}) · {{.Report.MessagesPerDay}} msgs/day{{else}}{{.Report.MessagesPerDay}} msgs/day{{end}}</div></div><button class="save-btn" onclick="saveSummary(event)">Save summary image</button></section>
   </main><div class="nav" id="nav"></div><div class="tooltip" id="tooltip"></div><script>const data={{.Data}};let cur=0;const slides=document.getElementById('slides');const total=slides.children.length;const nav=document.getElementById('nav');const tip=document.getElementById('tooltip');for(let i=0;i<total;i++){const d=document.createElement('div');d.className='dot'+(i?'':' active');d.title='Go to slide '+(i+1);d.addEventListener('click',()=>goTo(i));nav.appendChild(d)}function paintNav(){[...nav.children].forEach((d,i)=>d.classList.toggle('active',i===cur))}function goTo(n){cur=Math.max(0,Math.min(total-1,n));slides.style.transform='translateX(-'+(cur*100)+'vw)';paintNav()}function go(n){goTo(cur+n)}document.addEventListener('keydown',e=>{if(e.key==='ArrowRight'||e.key===' ')go(1);if(e.key==='ArrowLeft')go(-1)});function showTip(e,html){tip.innerHTML=html;tip.style.display='block';tip.style.left=e.clientX+14+'px';tip.style.top=e.clientY+14+'px'}function hideTip(){tip.style.display='none'}function medal(i){return String(i+1)}function medalClass(i){return i===0?' gold':i===1?' silver':i===2?' bronze':''}function rankRow(x,i,type,spotlight,entering){return '<div class="rank'+medalClass(i)+(spotlight?' leaderboard-spotlight':'')+(entering?' reveal':'')+'"><div class="rank-main"><span class="medal">'+medal(i)+'</span><div><div class="rank-name">'+x.name+'</div><div class="rank-meta">'+(x.sent||0).toLocaleString()+' sent · '+(x.received||0).toLocaleString()+' received</div></div></div><div style="display:flex;flex-direction:column;align-items:flex-end;line-height:1"><div class="label" style="font-size:12px;letter-spacing:.08em;text-transform:uppercase">'+type+'</div><div class="rank-count">'+x[type].toLocaleString()+'</div></div></div>'}function rank(el,items,type,animateTop){const root=document.getElementById(el);if(!items.length){root.innerHTML='<div class="card">No data</div>';return}if(animateTop){root.innerHTML='<div class="leaderboard-shell"><div class="leaderboard-spotlight-wrap"></div><div class="rank-list"></div></div>';const spotlightWrap=root.querySelector('.leaderboard-spotlight-wrap');const list=root.querySelector('.rank-list');spotlightWrap.innerHTML=rankRow(items[0],0,type,true,true);items.slice(1).forEach(function(x,i){setTimeout(function(){list.insertAdjacentHTML('beforeend',rankRow(x,i+1,type,false,true))},420+i*140)});return}root.innerHTML=items.map(function(x,i){return rankRow(x,i,type,false,false)}).join('')}rank('contacts',data.topContacts.slice(0,10),'messages',true);rank('groups',data.topGroups.slice(0,5),'messages');document.getElementById('summaryTop').textContent=(data.topContacts[0]?('Top contact: '+data.topContacts[0].name):'No top contact')+(data.emojis&&data.emojis[0]?' · Top emoji: '+data.emojis[0].emoji:'')+(data.tapbacks&&data.tapbacks[0]?' · Top tapback: '+data.tapbacks[0].emoji:'')+' · Duration: '+(data.durationLabel||'');
 function localDate(y,m,d){return new Date(y,m-1,d)}function keyDate(dt){const y=dt.getFullYear(),m=String(dt.getMonth()+1).padStart(2,'0'),d=String(dt.getDate()).padStart(2,'0');return y+'-'+m+'-'+d}function dateLabel(key){const p=key.split('-').map(Number);return localDate(p[0],p[1],p[2]).toLocaleDateString(undefined,{month:'short',day:'numeric',year:'numeric'})}function heat(){const counts=Object.fromEntries(data.dailyCounts.map(d=>[d.date,d.count]));const vals=data.dailyCounts.map(d=>d.count);const max=Math.max(1,...vals);const years=[...new Set(data.dailyCounts.map(d=>Number(d.date.slice(0,4))))].sort((a,b)=>a-b);let html='';years.forEach(year=>{const yearTotal=data.dailyCounts.filter(d=>d.date.startsWith(String(year))).reduce((s,d)=>s+d.count,0);let start=localDate(year,1,1),end=localDate(year,12,31);start.setDate(start.getDate()-start.getDay());let monthMarks='';let last=-1;let weeks=[];for(let d=new Date(start);d<=end;d.setDate(d.getDate()+7)){let week=[];for(let i=0;i<7;i++){const x=new Date(d);x.setDate(d.getDate()+i);if(x.getFullYear()===year&&x.getMonth()!==last){monthMarks+='<span style="position:absolute;left:'+(weeks.length*17)+'px">'+x.toLocaleDateString(undefined,{month:'short'})+'</span>';last=x.getMonth()}const key=keyDate(x);const inYear=x.getFullYear()===year;const c=inYear?(counts[key]||0):0;const l=c===0?0:Math.min(4,Math.ceil(c/max*4));week.push('<div class="cell l'+l+'" data-tip="'+dateLabel(key)+'<br>'+c.toLocaleString()+' messages"></div>')}weeks.push('<div class="week">'+week.join('')+'</div>')}html+='<div class="year-block" style="display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:18px;align-items:start"><div class="year-label">'+year+'</div><div><div class="months">'+monthMarks+'</div><div class="heat"><div class="days"><span></span><span>Mon</span><span></span><span>Wed</span><span></span><span>Fri</span><span></span></div>'+weeks.join('')+'</div></div><div style="display:flex;flex-direction:column;align-items:flex-end;justify-content:flex-start;min-width:108px;padding-top:2px"><span class="label" style="font-size:13px;letter-spacing:.08em;text-transform:uppercase">total</span><span style="font-size:24px;font-weight:900;letter-spacing:-.06em">'+yearTotal.toLocaleString()+'</span><span class="label" style="font-size:13px">messages</span></div></div>'});document.getElementById('heatmap').innerHTML=html;document.querySelectorAll('[data-tip]').forEach(el=>{el.addEventListener('mousemove',e=>showTip(e,el.dataset.tip));el.addEventListener('mouseleave',hideTip)})}heat();
 
-function evolution(){const contacts=data.relationshipLines,months=[...new Set(contacts.flatMap(c=>Object.keys(c.monthly)))].sort();const totals=months.map(m=>contacts.reduce((s,c)=>s+(c.monthly[m]||0),0));const max=Math.max(1,...totals);document.getElementById('evolution').innerHTML=months.map((m,i)=>'<div class="bar" data-tip="'+m+'<br>'+totals[i].toLocaleString()+' messages" style="height:'+Math.max(6,totals[i]/max*260)+'px"><span class="bar-label">'+m.slice(2)+'</span></div>').join('');document.querySelectorAll('.bar').forEach(el=>{el.addEventListener('mousemove',e=>showTip(e,el.dataset.tip));el.addEventListener('mouseleave',hideTip)})}evolution();
+function evolution(){const contacts=data.relationshipLines,months=[...new Set(contacts.flatMap(c=>Object.keys(c.monthly)))].sort();const totals=months.map(m=>contacts.reduce((s,c)=>s+(c.monthly[m]||0),0));const max=Math.max(1,...totals);document.getElementById('evolution').innerHTML=months.map((m,i)=>'<div class="bar" data-tip="'+m+'<br>'+totals[i].toLocaleString()+' messages" style="height:'+Math.max(6,totals[i]/max*260)+'px"><span class="bar-label">'+m.slice(2)+'</span></div>').join('');document.querySelectorAll('.bar').forEach(el=>{el.addEventListener('mousemove',e=>showTip(e,el.dataset.tip));el.addEventListener('mouseleave',hideTip)})}evolution();document.getElementById('summaryTop').textContent=(data.topEmoji?('Top emoji: '+data.topEmoji+' ('+data.topEmojiCount+')'):'No top emoji')+' · '+((data.messagesPerDay||0).toLocaleString())+' msgs/day';
 async function saveSummary(e){e.stopPropagation();const card=document.getElementById('summaryCard');const btn=e.currentTarget;btn.textContent='Saving...';try{const canvas=await html2canvas(card,{backgroundColor:'#ffffff',scale:2,logging:false});const a=document.createElement('a');a.download='imsgwrap-summary.png';a.href=canvas.toDataURL('image/png');a.click();btn.textContent='Saved'}catch(err){btn.textContent='Save failed'}setTimeout(()=>btn.textContent='Save summary image',1800)}
 </script></body></html>`
