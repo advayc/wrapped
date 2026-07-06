@@ -10,12 +10,8 @@ CACHE_BIN="$CACHE_DIR/imsgwrap"
 
 if command -v go >/dev/null 2>&1; then
   if [ -d "$ROOT/cmd/imsgwrap" ] && [ -f "$ROOT/go.mod" ]; then
-    cd "$ROOT"
-    exec go run ./cmd/imsgwrap "$@"
+    exec go run "$ROOT/cmd/imsgwrap" "$@"
   fi
-
-  PKG="${IMSGWRAP_GO_PACKAGE:-github.com/advayc/wrapped/cmd/imsgwrap@latest}"
-  exec go run "$PKG" "$@"
 fi
 
 if [ -x "$BIN" ]; then

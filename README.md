@@ -4,10 +4,10 @@ Wrapped is a simple local iMessage Wrapped for macOS written in Go. It reads you
 
 ## Use
 
-### With Go downloaded
+### With Go downloaded and this repo cloned
 
 ```bash
-go run ./cmd/imsgwrap
+./imsgwrap.sh
 ```
 
 ### Without Go downloaded
