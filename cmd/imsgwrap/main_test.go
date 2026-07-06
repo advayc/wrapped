@@ -82,10 +82,8 @@ func TestHTMLTemplateRenders(t *testing.T) {
 		ReceivedMessages: 4,
 		TopContacts:      []contactStat{{Name: "Ada", Messages: 10, Sent: 6, Received: 4, Monthly: map[string]int{"2026-01": 10}}},
 		DailyCounts:      []dayCount{{Date: "2026-01-01", Count: 10}},
-		ConversationHeat: []hourDayCount{{Day: 4, Hour: 12, Count: 10}},
 		Words:            []wordCount{{Text: "test", Count: 3}},
 		Emojis:           []emojiCount{{Emoji: "😂", Count: 2}},
-		EmojiSignature:   "😂",
 	}
 	var b strings.Builder
 	if err := pageTemplate.Execute(&b, map[string]any{"Report": report, "Data": `{}`}); err != nil {
