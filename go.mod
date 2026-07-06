@@ -1,4 +1,4 @@
-module github.com/AdvayChandorkar/imsgwrap
+module github.com/advayc/wrapped
 
 go 1.24
 

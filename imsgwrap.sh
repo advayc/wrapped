@@ -13,5 +13,5 @@ if [ -d "$ROOT/cmd/imsgwrap" ] && [ -f "$ROOT/go.mod" ]; then
   exec go run ./cmd/imsgwrap "$@"
 fi
 
-PKG="${IMSGWRAP_GO_PACKAGE:-github.com/AdvayChandorkar/imsgwrap/cmd/imsgwrap@latest}"
+PKG="${IMSGWRAP_GO_PACKAGE:-github.com/advayc/wrapped/cmd/imsgwrap@latest}"
 exec go run "$PKG" "$@"

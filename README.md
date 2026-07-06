@@ -5,7 +5,7 @@ Local iMessage Wrapped for macOS. It reads your Messages database, lets you choo
 ## Use
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/AdvayChandorkar/imsgwrap/main/imsgwrap.sh -o imsgwrap
+curl -fsSL https://raw.githubusercontent.com/advayc/wrapped/main/imsgwrap.sh -o imsgwrap
 chmod +x imsgwrap
 ./imsgwrap
 ```
@@ -19,7 +19,7 @@ For local development in this repo:
 ## Notes
 
 - Requires macOS Messages data and Full Disk Access for your terminal.
-- Output is written to `imsgwrap-output/`.
+- Output is written to `imsgwrap-output/` and opened automatically.
 - Nothing is uploaded; `index.html` and `data.json` are local files.
 - Tapbacks are counted as reactions, not normal messages.
 
