@@ -27,6 +27,28 @@ func TestContactPhoneNormalization(t *testing.T) {
 	}
 }
 
+func TestContactForBlankHandle(t *testing.T) {
+	key, name := contactFor("   ", map[string]string{})
+	if key != "" || name != "" {
+		t.Fatalf("got %q %q", key, name)
+	}
+}
+
+func TestResolveHandleUsesSingleParticipant(t *testing.T) {
+	got := resolveHandle("", []string{"+1 (555) 123-4567"})
+	if got != "+1 (555) 123-4567" {
+		t.Fatalf("got %q", got)
+	}
+}
+
+func TestGroupNameUsesParticipants(t *testing.T) {
+	contacts := map[string]string{"5551234567": "Ada", "5552223333": "Bob"}
+	got := groupName("", []string{"5551234567", "5552223333", "5554445555"}, contacts)
+	if got == "" || strings.HasPrefix(got, "Group ") || got == "Group chat" {
+		t.Fatalf("got %q", got)
+	}
+}
+
 func TestLongestStreak(t *testing.T) {
 	contacts := map[string]*contactStat{"a": {Name: "Ada"}}
 	days := map[string]map[string]bool{"a": {"2026-01-01": true, "2026-01-02": true, "2026-01-04": true}}

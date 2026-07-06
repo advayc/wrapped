@@ -129,6 +129,7 @@ type busiestDay struct {
 type analysis struct {
 	GeneratedAt        string         `json:"generatedAt"`
 	Timeframe          timeframe      `json:"timeframe"`
+	DurationLabel      string         `json:"durationLabel"`
 	TotalMessages      int            `json:"totalMessages"`
 	SentMessages       int            `json:"sentMessages"`
 	ReceivedMessages   int            `json:"receivedMessages"`
@@ -138,21 +139,19 @@ type analysis struct {
 	TopContacts        []contactStat  `json:"topContacts"`
 	TopGroups          []groupStat    `json:"topGroups"`
 	DailyCounts        []dayCount     `json:"dailyCounts"`
-	ConversationHeat   []hourDayCount `json:"conversationHeat"`
 	GoldenHour         string         `json:"goldenHour"`
 	GoldenDay          string         `json:"goldenDay"`
 	BusiestDay         busiestDay     `json:"busiestDay"`
 	LongestStreak      streakStat     `json:"longestStreak"`
 	Words              []wordCount    `json:"words"`
 	Emojis             []emojiCount   `json:"emojis"`
-	EmojiSignature     string         `json:"emojiSignature"`
+	Tapbacks           []emojiCount   `json:"tapbacks"`
 	StarterYouPct      int            `json:"starterYouPct"`
-	AvgYourReplyMin    float64        `json:"avgYourReplyMin"`
+	AvgResponseMin     float64        `json:"avgResponseMin"`
 	AvgTheirReplyMin   float64        `json:"avgTheirReplyMin"`
 	DoubleTexts        int            `json:"doubleTexts"`
 	BurstShort         int            `json:"burstShort"`
 	BurstLong          int            `json:"burstLong"`
-	LengthScatter      []contactStat  `json:"lengthScatter"`
 	RelationshipLines  []contactStat  `json:"relationshipLines"`
 }
 
@@ -562,6 +561,9 @@ func addPhoneKeys(m map[string]string, phone, name string) {
 }
 func contactFor(handle string, contacts map[string]string) (string, string) {
 	lower := strings.ToLower(strings.TrimSpace(handle))
+	if lower == "" {
+		return "", ""
+	}
 	if strings.Contains(lower, "@") {
 		if n := contacts[lower]; n != "" {
 			return "name:" + strings.ToLower(n), n
@@ -601,6 +603,7 @@ func loadMessages(tf timeframe, contacts map[string]string) ([]message, map[int6
 	}
 	defer db.Close()
 	participants := map[int64]int{}
+	chatHandles := map[int64][]string{}
 	rows, err := db.Query("SELECT chat_id, COUNT(*) FROM chat_handle_join GROUP BY chat_id")
 	if err == nil {
 		for rows.Next() {
@@ -608,6 +611,21 @@ func loadMessages(tf timeframe, contacts map[string]string) ([]message, map[int6
 			var c int
 			if rows.Scan(&cid, &c) == nil {
 				participants[cid] = c
+			}
+		}
+		rows.Close()
+	}
+	rows, err = db.Query("SELECT chj.chat_id, COALESCE(h.id,'') FROM chat_handle_join chj LEFT JOIN handle h ON chj.handle_id=h.ROWID ORDER BY chj.chat_id")
+	if err == nil {
+		for rows.Next() {
+			var cid int64
+			var handle string
+			if rows.Scan(&cid, &handle) == nil {
+				handle = strings.TrimSpace(handle)
+				if handle == "" {
+					continue
+				}
+				chatHandles[cid] = append(chatHandles[cid], handle)
 			}
 		}
 		rows.Close()
@@ -648,9 +666,13 @@ ORDER BY m.date`, assocExpr)
 		m.IsGroup = participants[m.ChatID] >= 2
 		m.IsTapback = assoc != 0 || looksTapback(m.Text)
 		m.IsCountable = !m.IsTapback && (strings.TrimSpace(m.Text) != "" || m.AttachmentCount > 0)
+		if !m.IsGroup {
+			m.Handle = resolveHandle(m.Handle, chatHandles[m.ChatID])
+		}
 		m.ContactKey, m.ContactName = contactFor(m.Handle, contacts)
-		if m.ContactName == "" && m.IsGroup {
-			m.ContactName = groupName(m, contacts, db)
+		if m.IsGroup {
+			m.ContactKey = ""
+			m.ContactName = groupName(m.ChatName, chatHandles[m.ChatID], contacts)
 		}
 		out = append(out, m)
 	}
@@ -675,27 +697,72 @@ func hasColumn(db *sql.DB, table, column string) bool {
 	return false
 }
 func looksTapback(s string) bool {
-	for _, p := range []string{"Loved \"", "Liked \"", "Disliked \"", "Laughed at \"", "Emphasized \"", "Questioned \""} {
-		if strings.HasPrefix(s, p) {
-			return true
+	return tapbackLabel(s) != ""
+}
+
+func tapbackLabel(s string) string {
+	for _, p := range []struct{ prefix, label string }{
+		{"Loved \"", "Loved"},
+		{"Liked \"", "Liked"},
+		{"Disliked \"", "Disliked"},
+		{"Laughed at \"", "Laughed"},
+		{"Emphasized \"", "Emphasized"},
+		{"Questioned \"", "Questioned"},
+	} {
+		if strings.HasPrefix(s, p.prefix) {
+			return p.label
 		}
 	}
-	return false
+	return ""
 }
-func groupName(m message, contacts map[string]string, db *sql.DB) string {
-	if m.ChatName != "" {
-		return m.ChatName
+func resolveHandle(handle string, chatHandles []string) string {
+	if strings.TrimSpace(handle) != "" {
+		return handle
 	}
-	return fmt.Sprintf("Group %d", m.ChatID)
+	if len(chatHandles) == 1 {
+		return chatHandles[0]
+	}
+	return handle
+}
+
+func groupName(displayName string, handles []string, contacts map[string]string) string {
+	if strings.TrimSpace(displayName) != "" {
+		return displayName
+	}
+	names := make([]string, 0, 2)
+	seen := map[string]bool{}
+	for _, handle := range handles {
+		_, name := contactFor(handle, contacts)
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		key := strings.ToLower(name)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		names = append(names, name)
+		if len(names) == 2 {
+			break
+		}
+	}
+	if len(names) == 0 {
+		return "Group chat"
+	}
+	if extra := len(handles) - len(names); extra > 0 {
+		return fmt.Sprintf("%s +%d", strings.Join(names, ", "), extra)
+	}
+	return strings.Join(names, ", ")
 }
 
 func analyze(msgs []message, participants map[int64]int, tf timeframe) analysis {
 	contactMap := map[string]*contactStat{}
 	groupMap := map[int64]*groupStat{}
 	daily := map[string]int{}
-	heat := map[string]int{}
 	words := map[string]int{}
 	emojis := map[string]int{}
+	tapbacks := map[string]int{}
 	contactDays := map[string]map[string]bool{}
 	busiestContacts := map[string]map[string]int{}
 	var total, sent, recv, attach, reactions, doubleTexts, burstShort, burstLong int
@@ -707,6 +774,9 @@ func analyze(msgs []message, participants map[int64]int, tf timeframe) analysis 
 	for _, m := range msgs {
 		if m.IsTapback {
 			reactions++
+			if label := tapbackLabel(m.Text); label != "" {
+				tapbacks[label]++
+			}
 			continue
 		}
 		if !m.IsCountable {
@@ -723,7 +793,6 @@ func analyze(msgs []message, participants map[int64]int, tf timeframe) analysis 
 		}
 		day := m.At.Format("2006-01-02")
 		daily[day]++
-		heat[fmt.Sprintf("%d:%d", int(m.At.Weekday()), m.At.Hour())]++
 		if m.IsGroup {
 			g := groupMap[m.ChatID]
 			if g == nil {
@@ -766,9 +835,7 @@ func analyze(msgs []message, participants map[int64]int, tf timeframe) analysis 
 		byContact[m.ContactKey] = append(byContact[m.ContactKey], m)
 		if strings.TrimSpace(m.Text) != "" {
 			collectWords(m.Text, words, wordStop)
-			if m.IsFromMe {
-				collectEmoji(m.Text, emojis)
-			}
+			collectEmoji(m.Text, emojis)
 		}
 	}
 
@@ -863,18 +930,6 @@ func analyze(msgs []message, participants map[int64]int, tf timeframe) analysis 
 	if busy.Date != "" {
 		busy.Top = topForDay(busiestContacts[busy.Date], contactMap)
 	}
-	heatRows := make([]hourDayCount, 0, len(heat))
-	var gh hourDayCount
-	for k, c := range heat {
-		parts := strings.Split(k, ":")
-		d, _ := strconv.Atoi(parts[0])
-		h, _ := strconv.Atoi(parts[1])
-		row := hourDayCount{Day: d, Hour: h, Count: c}
-		heatRows = append(heatRows, row)
-		if c > gh.Count {
-			gh = row
-		}
-	}
 	streak := longestStreak(contactDays, contactMap)
 	starterPct := 0
 	startsYou, startsThem := 0, 0
@@ -885,7 +940,7 @@ func analyze(msgs []message, participants map[int64]int, tf timeframe) analysis 
 	if startsYou+startsThem > 0 {
 		starterPct = int(math.Round(float64(startsYou) * 100 / float64(startsYou+startsThem)))
 	}
-	return analysis{GeneratedAt: time.Now().Format(time.RFC3339), Timeframe: tf, TotalMessages: total, SentMessages: sent, ReceivedMessages: recv, AttachmentMessages: attach, ReactionCount: reactions, UniqueContacts: len(contactMap), TopContacts: limitContacts(contacts, 20), TopGroups: limitGroups(groups, 5), DailyCounts: days, ConversationHeat: heatRows, GoldenHour: formatHour(gh.Hour), GoldenDay: weekdayName(gh.Day), BusiestDay: busy, LongestStreak: streak, Words: topWords(words, 60), Emojis: topEmojis(emojis, 20), EmojiSignature: firstEmoji(emojis), StarterYouPct: starterPct, AvgYourReplyMin: avg(yourReplySamples), AvgTheirReplyMin: avg(theirReplySamples), DoubleTexts: doubleTexts, BurstShort: burstShort, BurstLong: burstLong, LengthScatter: limitContacts(contacts, 12), RelationshipLines: limitContacts(contacts, 5)}
+	return analysis{GeneratedAt: time.Now().Format(time.RFC3339), Timeframe: tf, DurationLabel: fmt.Sprintf("%d days", int(tf.End.Sub(tf.Start).Hours()/24)+1), TotalMessages: total, SentMessages: sent, ReceivedMessages: recv, AttachmentMessages: attach, ReactionCount: reactions, UniqueContacts: len(contactMap), TopContacts: limitContacts(contacts, 20), TopGroups: limitGroups(groups, 5), DailyCounts: days, GoldenHour: "", GoldenDay: "", BusiestDay: busy, LongestStreak: streak, Words: topWords(words, 60), Emojis: topEmojis(emojis, 12), Tapbacks: topEmojis(tapbacks, 6), StarterYouPct: starterPct, AvgResponseMin: avg(yourReplySamples), AvgTheirReplyMin: avg(theirReplySamples), DoubleTexts: doubleTexts, BurstShort: burstShort, BurstLong: burstLong, RelationshipLines: limitContacts(contacts, 5)}
 }
 
 func transitions(arr []message, from, to bool) int {
@@ -1065,9 +1120,6 @@ func redact(a *analysis) {
 	for i := range a.TopContacts {
 		a.TopContacts[i].Name = fmt.Sprintf("Contact %d", i+1)
 	}
-	for i := range a.LengthScatter {
-		a.LengthScatter[i].Name = fmt.Sprintf("Contact %d", i+1)
-	}
 	for i := range a.RelationshipLines {
 		a.RelationshipLines[i].Name = fmt.Sprintf("Contact %d", i+1)
 	}
@@ -1115,25 +1167,24 @@ var pageTemplate = template.Must(template.New("page").Parse(htmlPage))
 
 const htmlPage = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>iMessage Wrapped</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet"><script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script><style>
 :root{--ink:#071016;--muted:#637083;--line:#e2e8f0;--soft:#f8fafc;--blue:#2563eb;--cyan:#06b6d4;--pink:#ec4899;--amber:#f59e0b;--violet:#7c3aed;--gold:#d6a11d;--silver:#9ca3af;--bronze:#b45309;--green0:#ebedf0;--green1:#9be9a8;--green2:#40c463;--green3:#30a14e;--green4:#216e39}*{box-sizing:border-box}body{margin:0;font-family:Inter,system-ui,sans-serif;color:var(--ink);background:radial-gradient(circle at 10% 10%,#e0f2fe 0,transparent 28%),radial-gradient(circle at 90% 20%,#fce7f3 0,transparent 30%),linear-gradient(135deg,#fff 0%,#f8fafc 100%);overflow:hidden}.slides{height:100vh;display:flex;transition:transform .45s cubic-bezier(.22,1,.36,1)}.slide{min-width:100vw;height:100vh;padding:54px 72px;display:flex;flex-direction:column;justify-content:center;gap:22px}.kicker{font-size:13px;font-weight:900;letter-spacing:.14em;text-transform:uppercase;color:var(--blue)}.hero{font-size:clamp(58px,9vw,132px);line-height:.88;letter-spacing:-.085em;font-weight:900}.sub{font-size:clamp(17px,2vw,26px);color:var(--muted);max-width:840px}.grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px}.card{border:1px solid rgba(148,163,184,.35);border-radius:28px;padding:24px;background:rgba(255,255,255,.82);box-shadow:0 16px 50px rgba(15,23,42,.08);backdrop-filter:blur(18px)}.card.blue{background:linear-gradient(135deg,#eff6ff,#fff)}.card.pink{background:linear-gradient(135deg,#fdf2f8,#fff)}.card.green{background:linear-gradient(135deg,#ecfdf5,#fff)}.num{font-size:clamp(42px,6vw,86px);font-weight:900;letter-spacing:-.065em}.label{color:var(--muted);font-weight:700}.rank{display:flex;align-items:center;justify-content:space-between;padding:13px 14px;border:1px solid transparent;border-radius:18px;gap:16px;margin-bottom:8px;background:rgba(255,255,255,.68)}.rank.gold{background:linear-gradient(90deg,rgba(214,161,29,.22),rgba(255,255,255,.86));border-color:rgba(214,161,29,.35)}.rank.silver{background:linear-gradient(90deg,rgba(156,163,175,.22),rgba(255,255,255,.86));border-color:rgba(156,163,175,.35)}.rank.bronze{background:linear-gradient(90deg,rgba(180,83,9,.2),rgba(255,255,255,.86));border-color:rgba(180,83,9,.32)}.rank-main{display:flex;align-items:center;gap:12px;min-width:0}.rank-name{font-size:18px;font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.rank-meta{font-size:12px;color:var(--muted);font-weight:700}.rank-count{font-weight:900;font-size:20px}.medal{font-size:22px}.pill{display:inline-flex;border:1px solid var(--line);border-radius:999px;padding:9px 13px;color:var(--muted);font-weight:800;background:white}.section-title{font-size:24px;font-weight:900;letter-spacing:-.03em}.chart-title{font-size:18px;font-weight:900;margin-bottom:6px}.chart-note{font-size:13px;color:var(--muted);font-weight:700;margin-bottom:12px}.heatwrap{overflow:auto;padding:12px;border:1px solid rgba(148,163,184,.32);border-radius:28px;background:rgba(255,255,255,.78);box-shadow:0 16px 40px rgba(15,23,42,.06)}.year-block{display:grid;grid-template-columns:54px 1fr;gap:12px;margin:0 0 18px}.year-label{font-weight:900;color:var(--blue);padding-top:24px}.months{height:18px;position:relative;margin-left:38px;color:var(--muted);font-size:11px;font-weight:800}.heat{display:flex;gap:4px}.days{width:32px;display:grid;grid-template-rows:repeat(7,13px);gap:4px;color:var(--muted);font-size:10px;font-weight:800}.week{display:grid;grid-template-rows:repeat(7,13px);gap:4px}.cell{width:13px;height:13px;border-radius:3px;background:var(--green0);transition:transform .12s ease,box-shadow .12s ease}.cell:hover,.mcell:hover{transform:scale(1.55);box-shadow:0 8px 20px rgba(15,23,42,.22);z-index:3}.l1{background:var(--green1)}.l2{background:var(--green2)}.l3{background:var(--green3)}.l4{background:var(--green4)}.legend{display:flex;align-items:center;gap:5px;color:var(--muted);font-size:12px;font-weight:800;margin-top:8px}.matrix-wrap{overflow:auto;border:1px solid rgba(148,163,184,.32);border-radius:28px;background:rgba(255,255,255,.78);padding:18px}.matrix{display:grid;grid-template-columns:62px repeat(24,24px);gap:5px;align-items:center;min-width:700px}.axis{font-size:11px;color:var(--muted);font-weight:800;text-align:center}.day-axis{text-align:right;padding-right:6px}.mcell{height:22px;border-radius:6px;background:var(--green0);transition:transform .12s ease,box-shadow .12s ease}.cloud{display:flex;flex-wrap:wrap;gap:12px 16px;align-items:center}.emoji-row{display:flex;gap:14px;flex-wrap:wrap}.emoji-chip{font-size:34px;background:white;border:1px solid var(--line);border-radius:22px;padding:9px 12px;box-shadow:0 10px 28px rgba(15,23,42,.06)}.chart-card{border:1px solid rgba(148,163,184,.32);border-radius:28px;background:rgba(255,255,255,.82);padding:22px;box-shadow:0 16px 44px rgba(15,23,42,.06)}.scatter{width:100%;height:390px}.bars{height:300px;display:flex;align-items:end;gap:12px;border-left:2px solid #cbd5e1;border-bottom:2px solid #cbd5e1;padding:16px 16px 0}.bar{flex:1;background:linear-gradient(180deg,var(--pink),var(--blue));border-radius:12px 12px 0 0;min-height:4px;position:relative}.bar-label{writing-mode:vertical-rl;transform:rotate(180deg);font-size:10px;color:var(--muted);position:absolute;bottom:-54px;left:50%;translate:-50% 0;font-weight:800}.tooltip{position:fixed;display:none;pointer-events:none;z-index:20;background:#0f172a;color:white;border-radius:12px;padding:9px 11px;font-size:12px;font-weight:800;box-shadow:0 16px 42px rgba(15,23,42,.28)}.summary-card{width:min(520px,88vw);background:linear-gradient(145deg,#ffffff,#eff6ff 55%,#fdf2f8);border:1px solid rgba(148,163,184,.4);border-radius:36px;padding:30px;box-shadow:0 22px 70px rgba(15,23,42,.16)}.summary-top{border-bottom:1px solid rgba(148,163,184,.35);padding-bottom:16px;margin-bottom:20px}.summary-title{font-weight:900;letter-spacing:-.04em;font-size:25px}.summary-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:12px}.summary-stat{background:rgba(255,255,255,.7);border:1px solid rgba(148,163,184,.26);border-radius:20px;padding:16px}.save-btn{border:0;border-radius:999px;background:#111827;color:white;padding:13px 18px;font-weight:900;cursor:pointer;width:max-content}.nav{position:fixed;bottom:22px;left:50%;transform:translateX(-50%);display:flex;gap:8px;align-items:center}.dot{width:8px;height:8px;border-radius:99px;background:#cbd5e1}.dot.active{width:28px;background:#111827}.arrow{position:fixed;top:50%;transform:translateY(-50%);border:0;background:rgba(255,255,255,.75);font-size:42px;cursor:pointer;border-radius:20px}.prev{left:18px}.next{right:18px}@media(max-width:850px){.slide{padding:34px 22px}.grid{grid-template-columns:1fr}.hero{font-size:58px}.arrow{display:none}.rank-name{font-size:15px}.matrix{grid-template-columns:44px repeat(24,18px)}.mcell{height:18px}.year-block{grid-template-columns:42px 1fr}}
-</style></head><body><main class="slides" id="slides">
+</style><style>body{background:#f6f4ee}.card,.card.blue,.card.pink,.card.green,.summary-card,.heatwrap,.matrix-wrap,.chart-card{background:#fff}.rank.gold{background:#fef3c7;border-color:#fcd34d}.rank.silver{background:#eef2f7;border-color:#d1d5db}.rank.bronze{background:#ffedd5;border-color:#fdba74}.bar{background:#2563eb}.arrow{display:none}.dot{cursor:pointer}.save-btn{transition:transform .18s ease,box-shadow .18s ease,background .18s ease}.save-btn:hover{transform:translateX(-50%) translateY(-1px);box-shadow:0 14px 30px rgba(17,24,39,.28);background:#0f172a}.summary-card{padding:36px}.summary-top{margin-bottom:24px}.summary-grid{gap:14px;margin-top:22px}.summary-footer{margin-top:22px}.year-label{line-height:1.1}</style></head><body><main class="slides" id="slides">
 <section class="slide"><div class="kicker">iMessage Wrapped</div><div class="hero">{{.Report.Timeframe.Label}}</div><div class="sub">A local-only Wrapped for your Messages data. Nothing uploaded. {{.Report.TotalMessages}} countable messages analyzed.</div><span class="pill">click or arrow keys to move</span></section>
 <section class="slide"><div class="kicker">Total history</div><div class="grid"><div class="card blue"><div class="num">{{.Report.TotalMessages}}</div><div class="label">messages</div></div><div class="card green"><div class="num">{{.Report.SentMessages}}</div><div class="label">sent by you</div></div><div class="card pink"><div class="num">{{.Report.ReceivedMessages}}</div><div class="label">received</div></div></div><div class="sub">Attachments-only messages count for activity. Tapbacks are tracked separately as {{.Report.ReactionCount}} reactions.</div></section>
 <section class="slide"><div class="kicker">Top Contact Leaderboard</div><div class="section-title">Gold, silver, bronze, then everyone else.</div><div id="contacts"></div></section>
 <section class="slide"><div class="kicker">Group chats</div><div class="section-title">Top group rooms, kept separate from personal contacts.</div><div id="groups"></div></section>
-<section class="slide"><div class="kicker">GitHub-style activity</div><div class="chart-title">Messages per day</div><div class="chart-note">Hover any square for the date and message count. All-time reports are stacked by year.</div><div class="heatwrap"><div id="heatmap"></div><div class="legend"><span>Less</span><span class="cell"></span><span class="cell l1"></span><span class="cell l2"></span><span class="cell l3"></span><span class="cell l4"></span><span>More</span></div></div><div class="sub">Busiest day: <b>{{.Report.BusiestDay.Date}}</b> with <b>{{.Report.BusiestDay.Messages}}</b> messages.</div></section>
-<section class="slide"><div class="kicker">Conversation Heatmap</div><div class="chart-title">Messages by day of week and hour</div><div class="chart-note">X-axis is hour of day. Y-axis is weekday. Golden hour: <b>{{.Report.GoldenHour}}</b> on <b>{{.Report.GoldenDay}}</b>.</div><div class="matrix-wrap"><div id="matrix"></div></div></section>
-<section class="slide"><div class="kicker">Words + Emoji Signature</div><div class="chart-title">Word cloud of the selected timeframe</div><div class="cloud" id="cloud"></div><div class="chart-title">Your sent emoji leaderboard</div><div class="emoji-row" id="emojis"></div></section>
+<section class="slide"><div class="kicker">GitHub-style activity</div><div class="chart-title">Messages per day</div><div class="chart-note">Hover any square for the date and message count. Each year label includes that year's total.</div><div class="heatwrap"><div id="heatmap"></div><div class="legend"><span>Less</span><span class="cell"></span><span class="cell l1"></span><span class="cell l2"></span><span class="cell l3"></span><span class="cell l4"></span><span>More</span></div></div><div class="sub">Busiest day: <b>{{.Report.BusiestDay.Date}}</b> with <b>{{.Report.BusiestDay.Messages}}</b> messages.</div></section>
+<section class="slide"><div class="kicker">Response Timing</div><div class="grid"><div class="card blue"><div class="num">{{printf "%.1f" .Report.AvgResponseMin}}</div><div class="label">avg response time</div></div><div class="card green"><div class="num">{{printf "%.1f" .Report.AvgTheirReplyMin}}</div><div class="label">avg time for them to reply</div></div><div class="card pink"><div class="num">{{.Report.StarterYouPct}}%</div><div class="label">started by you after 8h silence</div></div></div><div class="sub">This replaces the old day/hour conversation heatmap and keeps the focus on reply speed.</div></section>
+<section class="slide"><div class="kicker">Words + Emojis</div><div class="chart-title">Word cloud of the selected timeframe</div><div class="cloud" id="cloud"></div><div class="grid"><div class="card"><div class="chart-title">Most used emojis</div><div class="emoji-row" id="emojis"></div></div><div class="card"><div class="chart-title">Most used tapbacks</div><div class="emoji-row" id="tapbacks"></div></div></div></section>
 <section class="slide"><div class="kicker">Streak + Starters</div><div class="grid"><div class="card blue"><div class="num">{{.Report.LongestStreak.Days}}</div><div class="label">day streak with {{.Report.LongestStreak.Name}}</div></div><div class="card pink"><div class="num">{{.Report.StarterYouPct}}%</div><div class="label">started by you after 8h silence</div></div><div class="card green"><div class="num">{{printf "%.1f" .Report.AvgYourReplyMin}}</div><div class="label">avg minutes for you to reply</div></div></div></section>
 <section class="slide"><div class="kicker">Double Text Trigger</div><div class="grid"><div class="card pink"><div class="num">{{.Report.DoubleTexts}}</div><div class="label">consecutive sends without a reply</div></div><div class="card blue"><div class="num">{{.Report.BurstShort}}</div><div class="label">short-message bursts</div></div><div class="card green"><div class="num">{{.Report.BurstLong}}</div><div class="label">long paragraph sends</div></div></div></section>
-<section class="slide"><div class="kicker">Length Comparison</div><div class="chart-card"><div class="chart-title">Your average message length vs replies</div><div class="chart-note">X-axis: characters you send. Y-axis: average reply length received.</div><svg class="scatter" id="scatter"></svg></div></section>
+<section class="slide"><div class="kicker">Reply Stats</div><div class="grid"><div class="card blue"><div class="num">{{printf "%.1f" .Report.AvgResponseMin}}</div><div class="label">avg response time</div></div><div class="card pink"><div class="num">{{.Report.ReactionCount}}</div><div class="label">tapbacks found</div></div><div class="card green"><div class="num">{{.Report.DurationLabel}}</div><div class="label">report duration</div></div></div><div class="sub">Most frequent emoji and tapback are shown on the previous slide.</div></section>
 <section class="slide"><div class="kicker">Relationship Evolution</div><div class="chart-card"><div class="chart-title">Monthly message volume with top contacts</div><div class="chart-note">Total monthly volume across your top contacts in this report.</div><div class="bars" id="evolution"></div></div></section>
 <section class="slide"><div class="kicker">Receipt Breakdown</div><div class="hero">{{.Report.ReactionCount}}</div><div class="sub">Tapbacks/reactions found. They are not counted as normal messages.</div></section>
-<section class="slide"><div class="kicker">Share Card</div><div class="summary-card" id="summaryCard"><div class="summary-top"><div><div class="summary-title">iMessage Wrapped</div><div class="label">{{.Report.Timeframe.Label}}</div></div></div><div class="hero" style="font-size:72px">{{.Report.TotalMessages}}</div><div class="label">messages analyzed</div><div class="summary-grid"><div class="summary-stat"><div class="num" style="font-size:36px">{{.Report.SentMessages}}</div><div class="label">sent</div></div><div class="summary-stat"><div class="num" style="font-size:36px">{{.Report.ReceivedMessages}}</div><div class="label">received</div></div><div class="summary-stat"><div class="num" style="font-size:36px">{{.Report.StarterYouPct}}%</div><div class="label">starter ratio</div></div><div class="summary-stat"><div class="num" style="font-size:36px">{{.Report.EmojiSignature}}</div><div class="label">emoji signature</div></div></div><div class="label" style="margin-top:18px" id="summaryTop"></div></div><button class="save-btn" onclick="saveSummary(event)">Save summary image</button></section>
-</main><button class="arrow prev" onclick="go(-1)">‹</button><button class="arrow next" onclick="go(1)">›</button><div class="nav" id="nav"></div><div class="tooltip" id="tooltip"></div><script>const data={{.Data}};let cur=0;const slides=document.getElementById('slides');const total=slides.children.length;const nav=document.getElementById('nav');const tip=document.getElementById('tooltip');for(let i=0;i<total;i++){const d=document.createElement('div');d.className='dot'+(i?'':' active');nav.appendChild(d)}function paintNav(){[...nav.children].forEach((d,i)=>d.classList.toggle('active',i===cur))}function go(n){cur=Math.max(0,Math.min(total-1,cur+n));slides.style.transform='translateX(-'+(cur*100)+'vw)';paintNav()}document.addEventListener('keydown',e=>{if(e.key==='ArrowRight'||e.key===' ')go(1);if(e.key==='ArrowLeft')go(-1)});document.addEventListener('click',e=>{if(e.target.closest('button'))return;go(1)});function showTip(e,html){tip.innerHTML=html;tip.style.display='block';tip.style.left=e.clientX+14+'px';tip.style.top=e.clientY+14+'px'}function hideTip(){tip.style.display='none'}
-function medal(i){return i===0?'🥇':i===1?'🥈':i===2?'🥉':String(i+1)}function medalClass(i){return i===0?' gold':i===1?' silver':i===2?' bronze':''}function rank(el,items,type){document.getElementById(el).innerHTML=items.length?items.map((x,i)=>'<div class="rank'+medalClass(i)+'"><div class="rank-main"><span class="medal">'+medal(i)+'</span><div><div class="rank-name">'+x.name+'</div><div class="rank-meta">'+(x.sent||0).toLocaleString()+' sent · '+(x.received||0).toLocaleString()+' received</div></div></div><div style="display:flex;flex-direction:column;align-items:flex-end;line-height:1"><div class="label" style="font-size:12px;letter-spacing:.08em;text-transform:uppercase">'+type+'</div><div class="rank-count">'+x[type].toLocaleString()+'</div></div></div>').join(''):'<div class="card">No data</div>'}rank('contacts',data.topContacts.slice(0,10),'messages');rank('groups',data.topGroups.slice(0,5),'messages');document.getElementById('summaryTop').textContent=data.topContacts[0]?'Top contact: '+data.topContacts[0].name:'No top contact';
-function localDate(y,m,d){return new Date(y,m-1,d)}function keyDate(dt){const y=dt.getFullYear(),m=String(dt.getMonth()+1).padStart(2,'0'),d=String(dt.getDate()).padStart(2,'0');return y+'-'+m+'-'+d}function dateLabel(key){const p=key.split('-').map(Number);return localDate(p[0],p[1],p[2]).toLocaleDateString(undefined,{month:'short',day:'numeric',year:'numeric'})}function heat(){const counts=Object.fromEntries(data.dailyCounts.map(d=>[d.date,d.count]));const vals=data.dailyCounts.map(d=>d.count);const max=Math.max(1,...vals);const years=[...new Set(data.dailyCounts.map(d=>Number(d.date.slice(0,4))))].sort((a,b)=>a-b);let html='';years.forEach(year=>{let start=localDate(year,1,1),end=localDate(year,12,31);start.setDate(start.getDate()-start.getDay());let monthMarks='';let last=-1;let weeks=[];for(let d=new Date(start);d<=end;d.setDate(d.getDate()+7)){let week=[];for(let i=0;i<7;i++){const x=new Date(d);x.setDate(d.getDate()+i);if(x.getFullYear()===year&&x.getMonth()!==last){monthMarks+='<span style="position:absolute;left:'+(weeks.length*17)+'px">'+x.toLocaleDateString(undefined,{month:'short'})+'</span>';last=x.getMonth()}const key=keyDate(x);const inYear=x.getFullYear()===year;const c=inYear?(counts[key]||0):0;const l=c===0?0:Math.min(4,Math.ceil(c/max*4));week.push('<div class="cell l'+l+'" data-tip="'+dateLabel(key)+'<br>'+c.toLocaleString()+' messages"></div>')}weeks.push('<div class="week">'+week.join('')+'</div>')}html+='<div class="year-block"><div class="year-label">'+year+'</div><div><div class="months">'+monthMarks+'</div><div class="heat"><div class="days"><span></span><span>Mon</span><span></span><span>Wed</span><span></span><span>Fri</span><span></span></div>'+weeks.join('')+'</div></div></div>'});document.getElementById('heatmap').innerHTML=html;document.querySelectorAll('[data-tip]').forEach(el=>{el.addEventListener('mousemove',e=>showTip(e,el.dataset.tip));el.addEventListener('mouseleave',hideTip)})}heat();
-function matrix(){const m={};data.conversationHeat.forEach(x=>m[x.day+':'+x.hour]=x.count);const max=Math.max(1,...data.conversationHeat.map(x=>x.count));let html='<div class="matrix"><div></div>';for(let h=0;h<24;h++)html+='<div class="axis">'+(h%6===0?h:'')+'</div>';['Sun','Mon','Tue','Wed','Thu','Fri','Sat'].forEach((day,d)=>{html+='<div class="axis day-axis">'+day+'</div>';for(let h=0;h<24;h++){const c=m[d+':'+h]||0,l=c===0?0:Math.min(4,Math.ceil(c/max*4));html+='<div class="mcell l'+l+'" data-tip="'+day+' '+h+':00<br>'+c.toLocaleString()+' messages"></div>'}});document.getElementById('matrix').innerHTML=html+'</div>';document.querySelectorAll('.mcell').forEach(el=>{el.addEventListener('mousemove',e=>showTip(e,el.dataset.tip));el.addEventListener('mouseleave',hideTip)})}matrix();
-const maxWord=Math.max(1,...data.words.map(w=>w.count));document.getElementById('cloud').innerHTML=data.words.slice(0,42).map((w,i)=>'<span style="font-size:'+(15+w.count/maxWord*46)+'px;font-weight:'+(550+w.count/maxWord*350)+';color:hsl('+((i*31)%360)+' 70% 38%)" title="'+w.count+' uses">'+w.text+'</span>').join('');document.getElementById('emojis').innerHTML=(data.emojis||[]).slice(0,10).map(e=>'<div class="emoji-chip" title="'+e.count+' uses">'+e.emoji+' <span class="label" style="font-size:14px">'+e.count+'</span></div>').join('')||'<div class="card">No sent emojis found</div>';
+<section class="slide"><div class="kicker">Share Card</div><div class="summary-card" id="summaryCard"><div class="summary-top"><div><div class="summary-title">iMessage Wrapped</div><div class="label">{{.Report.Timeframe.Label}}</div><div class="label">{{.Report.DurationLabel}}</div></div></div><div class="hero" style="font-size:72px">{{.Report.TotalMessages}}</div><div class="label">messages analyzed</div><div class="summary-grid"><div class="summary-stat"><div class="num" style="font-size:36px">{{.Report.SentMessages}}</div><div class="label">sent</div></div><div class="summary-stat"><div class="num" style="font-size:36px">{{.Report.ReceivedMessages}}</div><div class="label">received</div></div><div class="summary-stat"><div class="num" style="font-size:36px">{{printf "%.1f" .Report.AvgResponseMin}}</div><div class="label">avg response time</div></div><div class="summary-stat"><div class="num" style="font-size:36px">{{.Report.StarterYouPct}}%</div><div class="label">starter ratio</div></div></div><div class="summary-footer" id="summaryTop"></div></div><button class="save-btn" onclick="saveSummary(event)">Save summary image</button></section>
+ </main><div class="nav" id="nav"></div><div class="tooltip" id="tooltip"></div><script>const data={{.Data}};let cur=0;const slides=document.getElementById('slides');const total=slides.children.length;const nav=document.getElementById('nav');const tip=document.getElementById('tooltip');for(let i=0;i<total;i++){const d=document.createElement('div');d.className='dot'+(i?'':' active');d.title='Go to slide '+(i+1);d.addEventListener('click',()=>goTo(i));nav.appendChild(d)}function paintNav(){[...nav.children].forEach((d,i)=>d.classList.toggle('active',i===cur))}function goTo(n){cur=Math.max(0,Math.min(total-1,n));slides.style.transform='translateX(-'+(cur*100)+'vw)';paintNav()}function go(n){goTo(cur+n)}document.addEventListener('keydown',e=>{if(e.key==='ArrowRight'||e.key===' ')go(1);if(e.key==='ArrowLeft')go(-1)});function showTip(e,html){tip.innerHTML=html;tip.style.display='block';tip.style.left=e.clientX+14+'px';tip.style.top=e.clientY+14+'px'}function hideTip(){tip.style.display='none'}
+function medal(i){return String(i+1)}function medalClass(i){return i===0?' gold':i===1?' silver':i===2?' bronze':''}function rank(el,items,type){document.getElementById(el).innerHTML=items.length?items.map((x,i)=>'<div class="rank'+medalClass(i)+'"><div class="rank-main"><span class="medal">'+medal(i)+'</span><div><div class="rank-name">'+x.name+'</div><div class="rank-meta">'+(x.sent||0).toLocaleString()+' sent · '+(x.received||0).toLocaleString()+' received</div></div></div><div style="display:flex;flex-direction:column;align-items:flex-end;line-height:1"><div class="label" style="font-size:12px;letter-spacing:.08em;text-transform:uppercase">'+type+'</div><div class="rank-count">'+x[type].toLocaleString()+'</div></div></div>').join(''):'<div class="card">No data</div>'}rank('contacts',data.topContacts.slice(0,10),'messages');rank('groups',data.topGroups.slice(0,5),'messages');document.getElementById('summaryTop').textContent=(data.topContacts[0]?('Top contact: '+data.topContacts[0].name):'No top contact')+(data.emojis&&data.emojis[0]?' · Top emoji: '+data.emojis[0].emoji:'')+(data.tapbacks&&data.tapbacks[0]?' · Top tapback: '+data.tapbacks[0].emoji:'')+' · Duration: '+(data.durationLabel||'');
+function localDate(y,m,d){return new Date(y,m-1,d)}function keyDate(dt){const y=dt.getFullYear(),m=String(dt.getMonth()+1).padStart(2,'0'),d=String(dt.getDate()).padStart(2,'0');return y+'-'+m+'-'+d}function dateLabel(key){const p=key.split('-').map(Number);return localDate(p[0],p[1],p[2]).toLocaleDateString(undefined,{month:'short',day:'numeric',year:'numeric'})}function heat(){const counts=Object.fromEntries(data.dailyCounts.map(d=>[d.date,d.count]));const vals=data.dailyCounts.map(d=>d.count);const max=Math.max(1,...vals);const years=[...new Set(data.dailyCounts.map(d=>Number(d.date.slice(0,4))))].sort((a,b)=>a-b);let html='';years.forEach(year=>{const yearTotal=data.dailyCounts.filter(d=>d.date.startsWith(String(year))).reduce((s,d)=>s+d.count,0);let start=localDate(year,1,1),end=localDate(year,12,31);start.setDate(start.getDate()-start.getDay());let monthMarks='';let last=-1;let weeks=[];for(let d=new Date(start);d<=end;d.setDate(d.getDate()+7)){let week=[];for(let i=0;i<7;i++){const x=new Date(d);x.setDate(d.getDate()+i);if(x.getFullYear()===year&&x.getMonth()!==last){monthMarks+='<span style="position:absolute;left:'+(weeks.length*17)+'px">'+x.toLocaleDateString(undefined,{month:'short'})+'</span>';last=x.getMonth()}const key=keyDate(x);const inYear=x.getFullYear()===year;const c=inYear?(counts[key]||0):0;const l=c===0?0:Math.min(4,Math.ceil(c/max*4));week.push('<div class="cell l'+l+'" data-tip="'+dateLabel(key)+'<br>'+c.toLocaleString()+' messages"></div>')}weeks.push('<div class="week">'+week.join('')+'</div>')}html+='<div class="year-block"><div class="year-label">'+year+'<br><span class="label" style="font-size:13px">'+yearTotal.toLocaleString()+' msgs</span></div><div><div class="months">'+monthMarks+'</div><div class="heat"><div class="days"><span></span><span>Mon</span><span></span><span>Wed</span><span></span><span>Fri</span><span></span></div>'+weeks.join('')+'</div></div></div>'});document.getElementById('heatmap').innerHTML=html;document.querySelectorAll('[data-tip]').forEach(el=>{el.addEventListener('mousemove',e=>showTip(e,el.dataset.tip));el.addEventListener('mouseleave',hideTip)})}heat();
+const maxWord=Math.max(1,...data.words.map(w=>w.count));document.getElementById('cloud').innerHTML=data.words.slice(0,42).map((w,i)=>'<span style="font-size:'+(15+w.count/maxWord*46)+'px;font-weight:'+(550+w.count/maxWord*350)+';color:hsl('+((i*31)%360)+' 70% 38%)" title="'+w.count+' uses">'+w.text+'</span>').join('');document.getElementById('emojis').innerHTML=(data.emojis||[]).slice(0,10).map(e=>'<div class="emoji-chip" title="'+e.count+' uses">'+e.emoji+' <span class="label" style="font-size:14px">'+e.count+'</span></div>').join('')||'<div class="card">No emojis found</div>';document.getElementById('tapbacks').innerHTML=(data.tapbacks||[]).slice(0,10).map(e=>'<div class="emoji-chip" title="'+e.count+' reactions">'+e.emoji+' <span class="label" style="font-size:14px">'+e.count+'</span></div>').join('')||'<div class="card">No tapbacks found</div>';
 function scatter(){const svg=document.getElementById('scatter'),w=900,h=390;svg.setAttribute('viewBox','0 0 '+w+' '+h);const xs=data.lengthScatter.map(x=>x.avgSentChars),ys=data.lengthScatter.map(x=>x.avgRecvChars);const mx=Math.max(1,...xs),my=Math.max(1,...ys);let html='<rect x="0" y="0" width="900" height="390" rx="22" fill="#fff"/><text x="450" y="28" text-anchor="middle" font-weight="900">Texting Length Comparison</text><text x="450" y="372" text-anchor="middle" fill="#637083" font-weight="800">Average characters you send</text><text x="18" y="210" transform="rotate(-90 18 210)" text-anchor="middle" fill="#637083" font-weight="800">Average reply length</text><line x1="70" y1="320" x2="850" y2="320" stroke="#cbd5e1"/><line x1="70" y1="54" x2="70" y2="320" stroke="#cbd5e1"/>';data.lengthScatter.forEach((x,i)=>{const cx=70+x.avgSentChars/mx*760,cy=320-x.avgRecvChars/my*250;const color=['#2563eb','#ec4899','#06b6d4','#f59e0b','#7c3aed'][i%5];html+='<circle cx="'+cx+'" cy="'+cy+'" r="9" fill="'+color+'" data-tip="'+x.name+'<br>You: '+x.avgSentChars.toFixed(1)+' chars · Replies: '+x.avgRecvChars.toFixed(1)+' chars"></circle>'});svg.innerHTML=html;svg.querySelectorAll('circle').forEach(el=>{el.addEventListener('mousemove',e=>showTip(e,el.getAttribute('data-tip')));el.addEventListener('mouseleave',hideTip)})}scatter();
 function evolution(){const contacts=data.relationshipLines,months=[...new Set(contacts.flatMap(c=>Object.keys(c.monthly)))].sort();const totals=months.map(m=>contacts.reduce((s,c)=>s+(c.monthly[m]||0),0));const max=Math.max(1,...totals);document.getElementById('evolution').innerHTML=months.map((m,i)=>'<div class="bar" data-tip="'+m+'<br>'+totals[i].toLocaleString()+' messages" style="height:'+Math.max(6,totals[i]/max*260)+'px"><span class="bar-label">'+m.slice(2)+'</span></div>').join('');document.querySelectorAll('.bar').forEach(el=>{el.addEventListener('mousemove',e=>showTip(e,el.dataset.tip));el.addEventListener('mouseleave',hideTip)})}evolution();
 async function saveSummary(e){e.stopPropagation();const card=document.getElementById('summaryCard');const btn=e.currentTarget;btn.textContent='Saving...';try{const canvas=await html2canvas(card,{backgroundColor:'#ffffff',scale:2,logging:false});const a=document.createElement('a');a.download='imsgwrap-summary.png';a.href=canvas.toDataURL('image/png');a.click();btn.textContent='Saved'}catch(err){btn.textContent='Save failed'}setTimeout(()=>btn.textContent='Save summary image',1800)}
