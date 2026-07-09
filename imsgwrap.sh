@@ -1,14 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT=""
+if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
+  ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+fi
 
-BIN="$ROOT/imsgwrap"
+BIN=""
+if [ -n "$ROOT" ]; then
+  BIN="$ROOT/imsgwrap"
+fi
 REMOTE_BIN_URL="https://raw.githubusercontent.com/advayc/wrapped/main/imsgwrap"
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/imsgwrap"
 CACHE_BIN="$CACHE_DIR/imsgwrap"
 
-if [ -d "$ROOT/cmd/imsgwrap" ] && [ -f "$ROOT/go.mod" ] && command -v go >/dev/null 2>&1 && go version >/dev/null 2>&1; then
+if [ "${IMSGWRAP_USE_GO:-}" = "1" ] && [ -d "$ROOT/cmd/imsgwrap" ] && [ -f "$ROOT/go.mod" ] && command -v go >/dev/null 2>&1 && go version >/dev/null 2>&1; then
   exec go run "$ROOT/cmd/imsgwrap" "$@"
 fi
 
